@@ -91,54 +91,111 @@ def get_completions(file: str, line: int, column: int) -> list[dict]:
 # ─── FastAPI Intelligence (AST) ───────────────────────────────────────────────
 
 @mcp.tool()
-def list_routes(file: str) -> list[dict]:
-    """List all FastAPI routes defined in a file, including those on APIRouter instances."""
-    tree = _parse(file)
+def list_routes(project_root: str) -> list[dict]:
+    """List all FastAPI routes across the entire project."""
     routes = []
 
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+    for py_file in Path(project_root).rglob("*.py"):
+        try:
+            tree = ast.parse(py_file.read_text())
+        except SyntaxError:
             continue
-        for decorator in node.decorator_list:
-            if not isinstance(decorator, ast.Call):
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            func = decorator.func
-            if not isinstance(func, ast.Attribute):
-                continue
-            if func.attr not in ("get", "post", "put", "patch", "delete", "head", "options"):
-                continue
-            path = decorator.args[0].value if decorator.args else "unknown"
-            routes.append({
-                "method": func.attr.upper(),
-                "path": path,
-                "handler": node.name,
-                "line": node.lineno,
-                "is_async": isinstance(node, ast.AsyncFunctionDef),
-            })
+            for decorator in node.decorator_list:
+                if not isinstance(decorator, ast.Call):
+                    continue
+                func = decorator.func
+                if not isinstance(func, ast.Attribute):
+                    continue
+                if func.attr not in ("get", "post", "put", "patch", "delete", "head", "options"):
+                    continue
+                path = decorator.args[0].value if decorator.args else "unknown"
+                routes.append({
+                    "method": func.attr.upper(),
+                    "path": path,
+                    "handler": node.name,
+                    "line": node.lineno,
+                    "file": str(py_file),
+                    "is_async": isinstance(node, ast.AsyncFunctionDef),
+                })
 
     return routes
 
 
 @mcp.tool()
-def get_dependencies(file: str, handler: str) -> dict:
-    """Get the full Depends() injection tree for a FastAPI handler."""
-    tree = _parse(file)
-
+def get_dependencies(project_root: str, handler: str) -> dict:
+    """Get the full Depends() injection tree for a FastAPI handler across the entire project."""
     dep_map: dict[str, list[str]] = {}
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+    alias_map: dict[str, str] = {}
+
+    for py_file in Path(project_root).rglob("*.py"):
+        try:
+            tree = ast.parse(py_file.read_text())
+        except SyntaxError:
             continue
-        deps = []
-        for default in node.args.defaults:
+
+        # collect Annotated aliases: SessionDep = Annotated[X, Depends(func)]
+        for node in ast.walk(tree):
             if (
-                isinstance(default, ast.Call)
-                and isinstance(default.func, ast.Name)
-                and default.func.id == "Depends"
-                and default.args
-                and isinstance(default.args[0], ast.Name)
+                isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Subscript)
+                and isinstance(node.targets[0], ast.Name)
+                and ast.unparse(node.value).startswith("Annotated[")
             ):
-                deps.append(default.args[0].id)
-        dep_map[node.name] = deps
+                slc = node.value.slice
+                if isinstance(slc, ast.Tuple):
+                    for elt in slc.elts:
+                        if (
+                            isinstance(elt, ast.Call)
+                            and isinstance(elt.func, ast.Name)
+                            and elt.func.id == "Depends"
+                            and elt.args
+                            and isinstance(elt.args[0], ast.Name)
+                        ):
+                            alias_map[node.targets[0].id] = elt.args[0].id
+
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            deps = []
+
+            # pattern 1: def handler(x=Depends(func))
+            for default in node.args.defaults:
+                if (
+                    isinstance(default, ast.Call)
+                    and isinstance(default.func, ast.Name)
+                    and default.func.id == "Depends"
+                    and default.args
+                    and isinstance(default.args[0], ast.Name)
+                ):
+                    deps.append(default.args[0].id)
+
+            # pattern 2: @router.get("/", dependencies=[Depends(func)])
+            for decorator in node.decorator_list:
+                if not isinstance(decorator, ast.Call):
+                    continue
+                for kw in decorator.keywords:
+                    if kw.arg == "dependencies" and isinstance(kw.value, ast.List):
+                        for elt in kw.value.elts:
+                            if (
+                                isinstance(elt, ast.Call)
+                                and isinstance(elt.func, ast.Name)
+                                and elt.func.id == "Depends"
+                                and elt.args
+                                and isinstance(elt.args[0], ast.Name)
+                            ):
+                                deps.append(elt.args[0].id)
+
+            # pattern 3: def handler(x: SessionDep) via Annotated alias
+            # covers both regular args and keyword-only args (after *)
+            for arg in node.args.args + node.args.kwonlyargs:
+                if arg.annotation and isinstance(arg.annotation, ast.Name):
+                    if arg.annotation.id in alias_map:
+                        deps.append(alias_map[arg.annotation.id])
+
+            dep_map[node.name] = deps
 
     def build_tree(name: str, seen: set[str] | None = None) -> dict:
         seen = seen or set()
@@ -151,7 +208,7 @@ def get_dependencies(file: str, handler: str) -> dict:
         }
 
     if handler not in dep_map:
-        return {"error": f"Handler '{handler}' not found in {file}"}
+        return {"error": f"Handler '{handler}' not found in project"}
 
     return build_tree(handler)
 
@@ -162,11 +219,26 @@ def get_dependencies(file: str, handler: str) -> dict:
 def list_models(file: str) -> list[str]:
     """List all Pydantic BaseModel classes defined in a file."""
     tree = _parse(file)
+    _model_bases = {"BaseModel", "SQLModel", "BaseSettings", "RootModel"}
+
+    class_bases: dict[str, list[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            class_bases[node.name] = [b.id for b in node.bases if isinstance(b, ast.Name)]
+
+    def is_model(name: str, seen: set[str] | None = None) -> bool:
+        seen = seen or set()
+        if name in seen:
+            return False
+        seen.add(name)
+        if name in _model_bases:
+            return True
+        return any(is_model(b, seen) for b in class_bases.get(name, []))
+
     return [
         node.name
         for node in ast.walk(tree)
-        if isinstance(node, ast.ClassDef)
-        and any(isinstance(b, ast.Name) and b.id == "BaseModel" for b in node.bases)
+        if isinstance(node, ast.ClassDef) and is_model(node.name)
     ]
 
 
@@ -174,14 +246,29 @@ def list_models(file: str) -> list[str]:
 def inspect_model(file: str, model: str) -> dict:
     """Inspect a Pydantic model: fields with types/defaults, and validators."""
     tree = _parse(file)
+    _model_bases = {"BaseModel", "SQLModel", "BaseSettings", "RootModel"}
+
+    # build full class hierarchy map
+    class_bases: dict[str, list[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            class_bases[node.name] = [b.id for b in node.bases if isinstance(b, ast.Name)]
+
+    def is_model(name: str, seen: set[str] | None = None) -> bool:
+        seen = seen or set()
+        if name in seen:
+            return False
+        seen.add(name)
+        if name in _model_bases:
+            return True
+        return any(is_model(b, seen) for b in class_bases.get(name, []))
 
     for node in ast.walk(tree):
         if not (isinstance(node, ast.ClassDef) and node.name == model):
             continue
 
-        bases = [b.id for b in node.bases if isinstance(b, ast.Name)]
-        if "BaseModel" not in bases:
-            return {"error": f"'{model}' does not inherit from BaseModel"}
+        if not is_model(model):
+            return {"error": f"'{model}' does not inherit from a known model base class"}
 
         fields = []
         validators = []
@@ -227,11 +314,173 @@ def find_model_usages(file: str, model: str) -> list[dict]:
                 if ast.unparse(node.annotation) == model:
                     results.append({"file": str(py_file), "line": node.lineno})
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                for arg in node.args.args:
+                for arg in node.args.args + node.args.kwonlyargs:
                     if arg.annotation and ast.unparse(arg.annotation) == model:
-                        results.append({"file": str(py_file), "line": arg.col_offset, "function": node.name})
+                        results.append({"file": str(py_file), "line": node.lineno, "function": node.name})
 
     return results
+
+@mcp.tool()
+def validate_response_models(file: str) -> list[dict]:
+    """Detect FastAPI routes missing a response_model declaration."""
+    tree = _parse(file)
+    issues = []
+
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            if not isinstance(decorator, ast.Call):
+                continue
+            func = decorator.func
+            if not isinstance(func, ast.Attribute):
+                continue
+            if func.attr not in ("get", "post", "put", "patch", "delete"):
+                continue
+            keywords = [kw.arg for kw in decorator.keywords]
+            if "response_model" not in keywords:
+                path = decorator.args[0].value if decorator.args else "unknown"
+                issues.append({
+                    "method": func.attr.upper(),
+                    "path": path,
+                    "handler": node.name,
+                    "line": node.lineno,
+                })
+
+    return issues
+
+@mcp.tool()
+def build_dependency_graph(file: str, project_root: str) -> list[dict]:
+    """Build a full dependency graph: route → handler → dependencies → models."""
+    tree = _parse(file)
+
+    _primitives = {"int", "str", "float", "bool", "bytes", "Any", "None"}
+
+    # collect Annotated aliases across the whole project
+    alias_map: dict[str, str] = {}
+    for py_file in Path(project_root).rglob("*.py"):
+        try:
+            t = ast.parse(py_file.read_text())
+        except SyntaxError:
+            continue
+        for node in ast.walk(t):
+            if (
+                isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Subscript)
+                and isinstance(node.targets[0], ast.Name)
+                and ast.unparse(node.value).startswith("Annotated[")
+            ):
+                slc = node.value.slice
+                if isinstance(slc, ast.Tuple):
+                    for elt in slc.elts:
+                        if (
+                            isinstance(elt, ast.Call)
+                            and isinstance(elt.func, ast.Name)
+                            and elt.func.id == "Depends"
+                        ):
+                            alias_map[node.targets[0].id] = ast.unparse(elt)
+
+    graph = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            if not isinstance(decorator, ast.Call):
+                continue
+            func = decorator.func
+            if not isinstance(func, ast.Attribute):
+                continue
+            if func.attr not in ("get", "post", "put", "patch", "delete"):
+                continue
+
+            response_model = None
+            for kw in decorator.keywords:
+                if kw.arg == "response_model":
+                    response_model = ast.unparse(kw.value)
+
+            all_args = node.args.args + node.args.kwonlyargs
+            defaults_with_depends = {
+                d.args[0].id
+                for d in node.args.defaults + node.args.kw_defaults
+                if d and isinstance(d, ast.Call)
+                and isinstance(d.func, ast.Name)
+                and d.func.id == "Depends"
+                and d.args
+                and isinstance(d.args[0], ast.Name)
+            }
+
+            input_models = [
+                ast.unparse(a.annotation)
+                for a in all_args
+                if a.annotation
+                and ast.unparse(a.annotation) not in _primitives
+                and ast.unparse(a.annotation) not in alias_map
+                and a.arg not in defaults_with_depends
+                and isinstance(a.annotation, ast.Name)
+                and a.annotation.id[0].isupper()
+            ]
+
+            dependencies = list(defaults_with_depends) + [
+                alias_map[ast.unparse(a.annotation)].split("(")[1].rstrip(")")
+                for a in all_args
+                if a.annotation
+                and isinstance(a.annotation, ast.Name)
+                and a.annotation.id in alias_map
+            ]
+
+            graph.append({
+                "method": func.attr.upper(),
+                "path": decorator.args[0].value if decorator.args else "unknown",
+                "handler": node.name,
+                "input_models": input_models,
+                "dependencies": dependencies,
+                "response_model": response_model,
+            })
+
+    return graph
+
+@mcp.tool()
+def detect_schema_orm_mismatches(orm_file: str, schema_file: str, orm_model: str, schema_model: str) -> dict:
+    """Detect field mismatches between a SQLAlchemy ORM model and a Pydantic schema."""
+    orm_tree = _parse(orm_file)
+    schema_tree = _parse(schema_file)
+
+    def _extract_fields(tree: ast.Module, class_name: str) -> set[str]:
+        # build class hierarchy to include inherited fields
+        class_bodies: dict[str, list] = {}
+        class_bases_map: dict[str, list[str]] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                class_bodies[node.name] = node.body
+                class_bases_map[node.name] = [b.id for b in node.bases if isinstance(b, ast.Name)]
+
+        def get_all_fields(name: str, seen: set[str] | None = None) -> set[str]:
+            seen = seen or set()
+            if name in seen:
+                return set()
+            seen.add(name)
+            fields = set()
+            for item in class_bodies.get(name, []):
+                if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+                    # include all annotated fields (mapped_column, Field, or plain)
+                    fields.add(item.target.id)
+            for base in class_bases_map.get(name, []):
+                fields |= get_all_fields(base, seen)
+            return fields
+
+        return get_all_fields(class_name)
+
+    orm_fields = _extract_fields(orm_tree, orm_model)
+    schema_fields = _extract_fields(schema_tree, schema_model)
+
+    return {
+        "orm_model": orm_model,
+        "schema_model": schema_model,
+        "in_schema_not_in_orm": list(schema_fields - orm_fields),
+        "in_orm_not_in_schema": list(orm_fields - schema_fields),
+        "matching_fields": list(orm_fields & schema_fields),
+    }
+
 
 
 def main():
