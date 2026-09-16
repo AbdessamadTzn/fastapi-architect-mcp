@@ -73,7 +73,7 @@ def rename_symbol(file: str, line: int, column: int, new_name: str) -> dict:
 def go_to_definition(file: str, line: int, column: int) -> dict | None:
     """Return the file and line where the symbol at the given position is defined."""
     script = jedi.Script(path=file, project=_project(file))
-    defs = script.goto(line=line, column=column)
+    defs = script.goto(line=line, column=column, follow_imports=True)
     for d in defs:
         if d.module_path:
             return {"file": str(d.module_path), "line": d.line, "column": d.column, "name": d.name}
