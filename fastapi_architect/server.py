@@ -3,6 +3,8 @@ import jedi
 import ast
 from pathlib import Path
 
+from fastapi_architect.files import iter_python_files as _iter_python_files
+
 mcp = FastMCP("fastapi-architect")
 
 
@@ -95,7 +97,7 @@ def list_routes(project_root: str) -> list[dict]:
     """List all FastAPI routes across the entire project."""
     routes = []
 
-    for py_file in Path(project_root).rglob("*.py"):
+    for py_file in _iter_python_files(project_root):
         try:
             tree = ast.parse(py_file.read_text())
         except SyntaxError:
@@ -130,7 +132,7 @@ def get_dependencies(project_root: str, handler: str) -> dict:
     dep_map: dict[str, list[str]] = {}
     alias_map: dict[str, str] = {}
 
-    for py_file in Path(project_root).rglob("*.py"):
+    for py_file in _iter_python_files(project_root):
         try:
             tree = ast.parse(py_file.read_text())
         except SyntaxError:
@@ -304,7 +306,7 @@ def find_model_usages(file: str, model: str) -> list[dict]:
     project = _project(file)
     results = []
 
-    for py_file in Path(str(project.path)).rglob("*.py"):
+    for py_file in _iter_python_files(str(project.path)):
         try:
             tree = ast.parse(py_file.read_text())
         except SyntaxError:
@@ -358,7 +360,7 @@ def build_dependency_graph(file: str, project_root: str) -> list[dict]:
 
     # collect Annotated aliases across the whole project
     alias_map: dict[str, str] = {}
-    for py_file in Path(project_root).rglob("*.py"):
+    for py_file in _iter_python_files(project_root):
         try:
             t = ast.parse(py_file.read_text())
         except SyntaxError:
