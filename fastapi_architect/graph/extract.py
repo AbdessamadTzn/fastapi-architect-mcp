@@ -446,11 +446,13 @@ class _Extractor:
                 self.f.middlewares.append(MiddlewareFacts(owner=owner, target=target, line=node.lineno))
 
 
-def extract_module(path: Path, root: Path) -> ModuleFacts:
+def extract_module(path: Path, root: Path, source: str | None = None) -> ModuleFacts:
     module, is_package = module_name(path, root)
     facts = ModuleFacts(module=module, file=path.relative_to(root).as_posix(), is_package=is_package)
+    if source is None:
+        source = path.read_text(encoding="utf-8", errors="replace")
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        tree = ast.parse(source)
     except SyntaxError as e:
         facts.error = f"SyntaxError: {e.msg} (line {e.lineno})"
         return facts
