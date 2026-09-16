@@ -5,7 +5,19 @@ from pathlib import Path
 
 from fastapi_architect.files import iter_python_files as _iter_python_files
 from fastapi_architect.graph import EdgeType, NodeType, load_graph
-from fastapi_architect.graph.queries import dependency_tree, direct_dependencies, handler_nodes, short_name
+from fastapi_architect.graph.audit import audit, hubs
+from fastapi_architect.graph.cache import CACHE_DIR, CACHE_FILE
+from fastapi_architect.graph.queries import (
+    dependency_tree,
+    direct_dependencies,
+    handler_nodes,
+    impact,
+    neighbors,
+    not_found,
+    paths,
+    resolve_node,
+    short_name,
+)
 
 mcp = FastMCP("fastapi-architect")
 
@@ -335,6 +347,168 @@ def detect_schema_orm_mismatches(orm_file: str, schema_file: str, orm_model: str
         "matching_fields": list(orm_fields & schema_fields),
     }
 
+
+
+# ─── Knowledge Graph ──────────────────────────────────────────────────────────
+
+@mcp.tool()
+def build_knowledge_graph(project_root: str, force: bool = False) -> dict:
+    """Build or refresh the project's FastAPI knowledge graph and return its statistics.
+
+    The graph links routes, handlers, dependencies, schemas, ORM models, SQL tables, templates and
+    function calls. It is cached in <project_root>/.fastapi-architect/ and only changed files are
+    re-parsed, so other graph tools are fast. Use force=True to rebuild from scratch.
+    """
+    result = load_graph(project_root, force=force)
+    kg = result.graph
+    errors = [
+        {"file": kg.node(m)["file"], "error": kg.node(m)["error"]}
+        for m in kg.nodes(NodeType.MODULE) if "error" in kg.node(m)
+    ]
+    return {
+        **kg.stats(),
+        "reparsed_files": len(result.reparsed),
+        "reused_files": result.reused,
+        "removed_files": result.removed,
+        "parse_errors": errors,
+        "cache": str(Path(project_root).resolve() / CACHE_DIR / CACHE_FILE),
+    }
+
+
+@mcp.tool()
+def graph_neighbors(
+    project_root: str,
+    node: str,
+    depth: int = 1,
+    edge_types: list[str] | None = None,
+    direction: str = "both",
+) -> dict:
+    """Explore the knowledge graph around a node.
+
+    `node` can be a graph id, a route ("GET /api/users/" or "/api/users/"), a table name, or a
+    function/class name. `direction` is "out" (what it uses), "in" (what uses it) or "both".
+    `edge_types` filters edges, e.g. ["DEPENDS_ON", "CALLS"]. Valid types: INCLUDES, HAS_ROUTE,
+    HANDLED_BY, DEPENDS_ON, ACCEPTS, RETURNS, CALLS, USES, QUERIES, RENDERS, MIDDLEWARE, INHERITS,
+    MAPS_TO, REFERENCES, RELATES_TO, MIRRORS, DEFINES (excluded by default).
+    """
+    kg = load_graph(project_root).graph
+    node_id, candidates = resolve_node(kg, node)
+    if node_id is None:
+        return not_found(kg, node, candidates)
+    if direction not in ("in", "out", "both"):
+        return {"error": "direction must be 'in', 'out' or 'both'"}
+    try:
+        types = {EdgeType(t.upper()) for t in edge_types} if edge_types else None
+    except ValueError:
+        return {"error": f"Unknown edge type in {edge_types}", "valid_edge_types": list(EdgeType)}
+    return neighbors(kg, node_id, depth=max(1, min(depth, 5)), edge_types=types, direction=direction)
+
+
+@mcp.tool()
+def impact_analysis(project_root: str, symbol: str, max_depth: int = 6) -> dict:
+    """What is affected if `symbol` changes: routes, handlers, dependencies, schemas, ORM models...
+
+    Follows reverse edges (callers, users, dependents, subclasses, mirroring schemas, tables → models).
+    Each impacted route includes a `via` chain explaining why. `symbol` accepts the same forms as
+    graph_neighbors (e.g. "User", "get_db", "users" for a table, "app.models.user:User").
+    """
+    kg = load_graph(project_root).graph
+    node_id, candidates = resolve_node(kg, symbol)
+    if node_id is None:
+        return not_found(kg, symbol, candidates)
+    return impact(kg, node_id, max_depth=max_depth)
+
+
+@mcp.tool()
+def find_path(project_root: str, source: str, target: str, max_paths: int = 3) -> dict:
+    """Shortest paths between two nodes, e.g. from a route to a table ("POST /chat" → "chat_logs").
+
+    Directed paths are tried first; if none exists, direction is ignored and `directed` is false.
+    """
+    kg = load_graph(project_root).graph
+    source_id, source_candidates = resolve_node(kg, source)
+    if source_id is None:
+        return not_found(kg, source, source_candidates)
+    target_id, target_candidates = resolve_node(kg, target)
+    if target_id is None:
+        return not_found(kg, target, target_candidates)
+    return paths(kg, source_id, target_id, max_paths=max(1, min(max_paths, 10)))
+
+
+@mcp.tool()
+def audit_graph(project_root: str, auth_dependencies: list[str] | None = None) -> dict:
+    """Project-wide checks: write routes without auth, duplicate routes, routers never mounted,
+    unused schemas, unreferenced ORM models, dependency cycles and parse errors.
+
+    Auth is inferred from dependency names, auth Header params and calls to auth-like functions.
+    Pass `auth_dependencies` (function names) to declare custom guards the heuristics miss.
+    """
+    return audit(load_graph(project_root).graph, auth_dependencies)
+
+
+@mcp.tool()
+def graph_report(project_root: str) -> str:
+    """A concise Markdown overview of the project: stats, routes with their auth, hubs and audit findings.
+    Good first call to understand an unfamiliar FastAPI codebase."""
+    from fastapi_architect.graph.audit import route_auth
+
+    kg = load_graph(project_root).graph
+    stats = kg.stats()
+    findings = audit(kg)
+    lines = [
+        f"# FastAPI knowledge graph — {Path(project_root).resolve().name}",
+        "",
+        f"{stats['nodes']} nodes, {stats['edges']} edges. "
+        + ", ".join(f"{count} {kind}" for kind, count in sorted(stats["node_types"].items()) if kind != "Module"),
+        "",
+        "## Routes",
+        "",
+        "| Method | Path | Handler | Auth |",
+        "|---|---|---|---|",
+    ]
+    for route_id in sorted(kg.nodes(NodeType.ROUTE), key=lambda r: (kg.node(r)["full_paths"][0], kg.node(r)["method"])):
+        route = kg.node(route_id)
+        handler = kg.successors(route_id, EdgeType.HANDLED_BY)[0]
+        auth = route_auth(kg, route_id)
+        lines.append(
+            f"| {route['method']} | `{route['full_paths'][0]}` | `{handler}` | "
+            + (f"{auth['kind']}: `{auth['by']}`" if auth else "—") + " |"
+        )
+
+    lines += ["", "## Most connected symbols", ""]
+    lines += [f"- `{h['id']}` ({h['type']}, degree {h['degree']})" for h in hubs(kg)]
+
+    tables = kg.nodes(NodeType.TABLE)
+    if tables:
+        lines += ["", "## Tables", ""]
+        for table in sorted(tables):
+            models = [short_name(kg, m) for m in kg.predecessors(table, EdgeType.MAPS_TO)]
+            queried_by = kg.predecessors(table, EdgeType.QUERIES)
+            lines.append(
+                f"- `{kg.node(table)['name']}`"
+                + (f" ← model {', '.join(models)}" if models else "")
+                + (f", raw SQL in {len(queried_by)} place(s)" if queried_by else "")
+            )
+
+    summary = findings["summary"]
+    lines += ["", "## Audit", ""]
+    lines.append(f"- Write routes without detected auth: {summary['unprotected_write_routes']}")
+    lines += [
+        f"  - {r['name']}" + (" (likely public)" if r["likely_public"] else "")
+        for r in findings["unprotected_write_routes"]
+    ]
+    for key, label in [
+        ("duplicate_routes", "Duplicate routes"),
+        ("unmounted_routes", "Routes on routers never included"),
+        ("unused_schemas", "Unused schemas"),
+        ("unreferenced_orm_models", "Unreferenced ORM models"),
+        ("dependency_cycles", "Dependency cycles"),
+        ("parse_errors", "Files with syntax errors"),
+    ]:
+        lines.append(f"- {label}: {summary[key]}")
+        if key in ("unused_schemas", "unreferenced_orm_models") and findings[key]:
+            lines.append("  - " + ", ".join(f"`{item['name']}`" for item in findings[key]))
+    return "\n".join(lines) + "\n"
 
 
 def main():
