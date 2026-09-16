@@ -44,6 +44,7 @@ class GraphBuilder:
     def build(self) -> KnowledgeGraph:
         self._declare_nodes()
         self._classify_classes()
+        self._field_edges()
         self._orm_edges()
         self._resolve_aliases()
         for m in self.modules:
@@ -166,6 +167,17 @@ class GraphBuilder:
             if node_type == NodeType.CLASS and (externals & ORM_DECLARATIVE_BASES or ancestors & orm_base_vars):
                 self.kg.node(node_id)["orm_base"] = True
 
+    def _field_edges(self) -> None:
+        """Class attribute annotations referencing other project classes (nested schemas, Mapped[...])."""
+        for node_id, (m, c) in self._classes.items():
+            for ref in c.field_refs:
+                target = self._symbol(m.module, ref)
+                if not target or target == node_id or self.kg.type_of(target) not in CLASS_TYPES:
+                    continue
+                if self.kg.type_of(node_id) == self.kg.type_of(target) == NodeType.ORM_MODEL:
+                    continue  # Mapped[...] relationship annotations: covered by RELATES_TO
+                self.kg.add_edge(node_id, target, EdgeType.USES, via="field")
+
     def _orm_edges(self) -> None:
         for node_id, (m, c) in self._classes.items():
             if self.kg.type_of(node_id) != NodeType.ORM_MODEL:
@@ -255,6 +267,9 @@ class GraphBuilder:
 
     def _module_edges(self, m: ModuleFacts) -> None:
         self._add_query(f"module:{m.module}", m.sql)
+        for name in m.names:
+            if (target := self._symbol(m.module, name)) and self.kg.type_of(target) in CLASS_TYPES:
+                self.kg.add_edge(f"module:{m.module}", target, EdgeType.USES)
 
         for v in m.variables:
             for dep in v.depends_refs:

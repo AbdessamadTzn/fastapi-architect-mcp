@@ -127,6 +127,7 @@ def test_serialization_roundtrip(kg: KnowledgeGraph):
     ("SELECT EXTRACT(EPOCH FROM now()) FROM t WHERE x = 'text from the user'", [("t", "read")]),
     (f"SELECT * FROM {'?'} WHERE 1=1", []),
     ("select the best one from the list", []),
+    ("SELECT indexname FROM pg_indexes JOIN information_schema.columns c ON 1=1", []),
     ("Update the cache from settings", []),
 ])
 def test_sql_tables(sql: str, expected: list):

@@ -26,6 +26,7 @@ _SQL_TABLE = re.compile(
 )
 _SQL_CTE = re.compile(r"(?:\bWITH\s+(?:RECURSIVE\s+)?|,\s*)([A-Za-z_]\w*)\s+AS\s*(?:NOT\s+)?(?:MATERIALIZED\s+)?\(", re.I)
 _SQL_KEYWORDS = {"select", "set", "values", "lateral", "only", "exists", "not", "if", "and", "or", "on", "where", "as", "the"}
+_SQL_SYSTEM_TABLES = ("pg_", "information_schema.", "sqlite_", "sys.")
 _SQL_NOISE = re.compile(r"'(?:[^']|'')*'|--[^\n]*|/\*.*?\*/", re.S)  # string literals and comments
 
 
@@ -70,6 +71,7 @@ class ClassFacts:
     bases: list[str] = field(default_factory=list)
     keywords: dict[str, str] = field(default_factory=dict)
     fields: list[str] = field(default_factory=list)
+    field_refs: list[str] = field(default_factory=list)
     tablename: str | None = None
     abstract: bool = False
     relationship_refs: list[str] = field(default_factory=list)
@@ -122,6 +124,7 @@ class ModuleFacts:
     includes: list[IncludeFacts] = field(default_factory=list)
     middlewares: list[MiddlewareFacts] = field(default_factory=list)
     orm_base_vars: list[str] = field(default_factory=list)
+    names: list[str] = field(default_factory=list)  # module-level references outside defs
     sql: list[tuple[str, str]] = field(default_factory=list)
     error: str | None = None
 
@@ -215,7 +218,7 @@ def sql_tables(text: str) -> list[tuple[str, str]]:
         keyword, name, paren = m.group(1).upper(), m.group(2).strip('"').lower(), m.group(3)
         if paren and keyword in ("FROM", "JOIN"):
             continue  # function call: unnest(...), now()
-        if name in ctes or name in _SQL_KEYWORDS or "?" in name:
+        if name in ctes or name in _SQL_KEYWORDS or "?" in name or name.startswith(_SQL_SYSTEM_TABLES):
             continue
         op = "ddl" if keyword.startswith("TABLE") else "write" if keyword in ("INTO", "UPDATE") else "read"
         if keyword == "FROM" and re.search(r"\bDELETE\s+$", text[: m.start()], re.I):
@@ -252,11 +255,15 @@ class _Extractor:
                 self._alias(node.name.id, node.value, node.lineno)
         self._definitions(self.tree.body, prefix="")
         self._module_calls()
+        names = set()
         for node in self.tree.body:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 for sub in ast.walk(node):
-                    if id(sub) not in self._docstrings and (text := _string_value(sub)) is not None:
+                    if isinstance(sub, (ast.Name, ast.Attribute)) and isinstance(sub.ctx, ast.Load) and (d := dotted(sub)):
+                        names.add(d)
+                    elif id(sub) not in self._docstrings and (text := _string_value(sub)) is not None:
                         self.f.sql.extend(sql_tables(text))
+        self.f.names = sorted(names)
 
     def _imports(self) -> None:
         package = self.f.module.split(".") if self.f.is_package else self.f.module.split(".")[:-1]
@@ -406,6 +413,8 @@ class _Extractor:
                 target, value = item.targets[0].id, item.value
             if target is None:
                 continue
+            if annotation is not None:
+                cls.field_refs.extend(r for r in type_refs(annotation) if r not in cls.field_refs)
 
             if target == "__tablename__":
                 cls.tablename = _str(value)

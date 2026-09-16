@@ -31,7 +31,7 @@ class EdgeType(StrEnum):
     ACCEPTS = "ACCEPTS"            # function → Schema/ORMModel     (attr: param)
     RETURNS = "RETURNS"            # function → Schema/ORMModel
     CALLS = "CALLS"                # function → function
-    USES = "USES"                  # function → class
+    USES = "USES"                  # function/class/Module → class  (attr: via="field" for annotations)
     QUERIES = "QUERIES"            # function/Module → Table        (attr: ops)
     RENDERS = "RENDERS"            # function → Template
     MIDDLEWARE = "MIDDLEWARE"      # App → Middleware

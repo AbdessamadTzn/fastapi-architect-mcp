@@ -30,7 +30,7 @@ from fastapi_architect.graph.model import KnowledgeGraph
 CACHE_DIR = ".fastapi-architect"
 CACHE_FILE = "graph.json"
 # bump whenever extraction output changes, to invalidate existing caches
-CACHE_VERSION = 1
+CACHE_VERSION = 3
 
 
 @dataclass
