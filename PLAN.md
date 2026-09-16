@@ -82,8 +82,9 @@ ID qualifiés : `app.models.database:ForumEvent`.
 - Validation : rendu vérifié dans Chrome headless sur FileRouge (204/1301 nœuds affichés par défaut) et TechFi24 (118/487)
 
 ### Phase 5 : Finitions
-- [ ] Validation sur FileRouge et TechFi24
-- [ ] README, version 0.3.0
+- [x] Validation sur FileRouge et TechFi24
+- [x] README (outils du graphe, modèle, cache, limites), version 0.3.0
+- [ ] Publication PyPI 0.3.0
 
 ## Limites connues (analyse statique)
 Routes dynamiques (`add_api_route` avec variables), deps passées par variable, appels via
