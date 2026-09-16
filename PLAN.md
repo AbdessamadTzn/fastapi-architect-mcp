@@ -66,12 +66,14 @@ ID qualifiés : `app.models.database:ForumEvent`.
 - [x] Bugs connus corrigés (les 2 tests xfail passent)
 
 ### Phase 3 : Outils MCP
-- [ ] `build_knowledge_graph(project_root, force=False)`
-- [ ] `graph_neighbors(node, depth, edge_types)`
-- [ ] `impact_analysis(symbol)`
-- [ ] `find_path(source, target)`
-- [ ] `audit_graph()` : routes d'écriture sans auth (via Depends **ou** appel/Header d'auth), schémas orphelins, cycles, nœuds centraux
-- [ ] Resource `graph://report`
+- [x] `build_knowledge_graph(project_root, force=False)` : stats, fichiers reparsés, erreurs de parsing
+- [x] `graph_neighbors(node, depth, edge_types, direction)` : nœud par id, route (`GET /path`), table ou nom
+- [x] `impact_analysis(symbol)` : parcours inverse groupé par type, chaîne `via` pour chaque route
+- [x] `find_path(source, target)` : plus courts chemins, orientés puis non orientés
+- [x] `audit_graph(auth_dependencies)` : écritures sans auth (Depends, Header, appels manuels), doublons, routers non montés, schémas inutilisés, ORM non référencés, cycles
+- [x] `graph_report` (outil Markdown plutôt qu'une resource MCP, qui exigerait la racine du projet dans l'URI)
+- [x] Extraction enrichie : types des champs (schémas imbriqués), références au niveau module, tables système SQL ignorées
+- Validation : détection d'auth correcte sur toutes les routes de FileRouge et TechFi24 ; 9 schémas réellement inutilisés dans FileRouge (anciens schémas d'auth)
 
 ### Phase 4 : Visualisation
 - [ ] `export_graph_html()` : HTML autonome (vis-network), couleurs par type, filtres, panneau de détail
