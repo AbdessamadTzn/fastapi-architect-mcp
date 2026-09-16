@@ -18,6 +18,9 @@ dependencies = [
     "jedi>=0.19.0",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
 [project.urls]
 Homepage = "https://github.com/AbdessamadTzn/fastapi-architect-mcp"
 Repository = "https://github.com/AbdessamadTzn/fastapi-architect-mcp"
@@ -27,3 +30,7 @@ fastapi-architect-mcp = "fastapi_architect.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["fastapi_architect"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["fixtures"]
