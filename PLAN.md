@@ -56,9 +56,14 @@ ID qualifiés : `app.models.database:ForumEvent`.
 - Validation : FileRouge → 29 routes, 13 ORM, 40 schémas, 31 tables ; TechFi24 → 26 routes, 6 tables, 9 templates
 
 ### Phase 2 : Cache et incrémental
-- [ ] `.fastapi-architect/graph.json` avec hash par fichier
-- [ ] Reparse uniquement des fichiers modifiés
-- [ ] Réécriture de `list_routes`, `get_dependencies` et `build_dependency_graph` sur le graphe (même format de sortie)
+- [x] `.fastapi-architect/graph.json` : faits d'extraction par fichier, signature (mtime, taille) + sha1, `.gitignore` auto
+- [x] Reparse uniquement des fichiers modifiés, graphe mémorisé en mémoire (FileRouge : 1,5 s à froid → 0,14 s disque → 0,03 s mémoire)
+- [x] `list_routes`, `get_dependencies`, `build_dependency_graph` réécrits sur le graphe
+  - chemins complets avec préfixes, `api_route(methods=[...])` pris en charge
+  - dépendances router / include_router / décorateur, dans l'ordre d'exécution FastAPI
+  - `input_models` limité aux vrais schémas (plus de `Request`/`Session` injectés)
+  - noms ambigus signalés avec la liste des candidats
+- [x] Bugs connus corrigés (les 2 tests xfail passent)
 
 ### Phase 3 : Outils MCP
 - [ ] `build_knowledge_graph(project_root, force=False)`
