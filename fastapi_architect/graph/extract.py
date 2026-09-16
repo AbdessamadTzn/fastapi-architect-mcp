@@ -43,6 +43,7 @@ class RouteFacts:
     method: str
     path: str
     line: int
+    response_model: str | None = None
     response_model_refs: list[str] = field(default_factory=list)
     depends_refs: list[str] = field(default_factory=list)
 
@@ -346,7 +347,8 @@ class _Extractor:
                         method=method,
                         path=path,
                         line=dec.lineno,
-                        response_model_refs=type_refs(_kw(dec, "response_model")),
+                        response_model=ast.unparse(rm) if (rm := _kw(dec, "response_model")) is not None else None,
+                        response_model_refs=type_refs(rm),
                         depends_refs=_depends_list(_kw(dec, "dependencies")),
                     ))
             elif attr == "middleware" and owner:

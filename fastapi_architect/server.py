@@ -4,6 +4,8 @@ import ast
 from pathlib import Path
 
 from fastapi_architect.files import iter_python_files as _iter_python_files
+from fastapi_architect.graph import EdgeType, NodeType, load_graph
+from fastapi_architect.graph.queries import dependency_tree, direct_dependencies, handler_nodes, short_name
 
 mcp = FastMCP("fastapi-architect")
 
@@ -94,125 +96,40 @@ def get_completions(file: str, line: int, column: int) -> list[dict]:
 
 @mcp.tool()
 def list_routes(project_root: str) -> list[dict]:
-    """List all FastAPI routes across the entire project."""
+    """List all FastAPI routes across the entire project, with full paths (router prefixes applied)."""
+    kg = load_graph(project_root).graph
+    root = Path(project_root).resolve()
     routes = []
-
-    for py_file in _iter_python_files(project_root):
-        try:
-            tree = ast.parse(py_file.read_text())
-        except SyntaxError:
-            continue
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            for decorator in node.decorator_list:
-                if not isinstance(decorator, ast.Call):
-                    continue
-                func = decorator.func
-                if not isinstance(func, ast.Attribute):
-                    continue
-                if func.attr not in ("get", "post", "put", "patch", "delete", "head", "options"):
-                    continue
-                path = decorator.args[0].value if decorator.args else "unknown"
-                routes.append({
-                    "method": func.attr.upper(),
-                    "path": path,
-                    "handler": node.name,
-                    "line": node.lineno,
-                    "file": str(py_file),
-                    "is_async": isinstance(node, ast.AsyncFunctionDef),
-                })
-
-    return routes
+    for route_id in kg.nodes(NodeType.ROUTE):
+        route = kg.node(route_id)
+        handler = kg.node(kg.successors(route_id, EdgeType.HANDLED_BY)[0])
+        routes.append({
+            "method": route["method"],
+            "path": route["full_paths"][0],
+            "full_paths": route["full_paths"],
+            "handler": handler["name"],
+            "line": handler["line"],
+            "file": str(root / route["file"]),
+            "is_async": handler["is_async"],
+            "mounted": route["mounted"],
+        })
+    return sorted(routes, key=lambda r: (r["file"], r["line"], r["method"]))
 
 
 @mcp.tool()
 def get_dependencies(project_root: str, handler: str) -> dict:
-    """Get the full Depends() injection tree for a FastAPI handler across the entire project."""
-    dep_map: dict[str, list[str]] = {}
-    alias_map: dict[str, str] = {}
+    """Get the full Depends() injection tree for a FastAPI handler across the entire project.
 
-    for py_file in _iter_python_files(project_root):
-        try:
-            tree = ast.parse(py_file.read_text())
-        except SyntaxError:
-            continue
-
-        # collect Annotated aliases: SessionDep = Annotated[X, Depends(func)]
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Assign)
-                and isinstance(node.value, ast.Subscript)
-                and isinstance(node.targets[0], ast.Name)
-                and ast.unparse(node.value).startswith("Annotated[")
-            ):
-                slc = node.value.slice
-                if isinstance(slc, ast.Tuple):
-                    for elt in slc.elts:
-                        if (
-                            isinstance(elt, ast.Call)
-                            and isinstance(elt.func, ast.Name)
-                            and elt.func.id == "Depends"
-                            and elt.args
-                            and isinstance(elt.args[0], ast.Name)
-                        ):
-                            alias_map[node.targets[0].id] = elt.args[0].id
-
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            deps = []
-
-            # pattern 1: def handler(x=Depends(func))
-            for default in node.args.defaults:
-                if (
-                    isinstance(default, ast.Call)
-                    and isinstance(default.func, ast.Name)
-                    and default.func.id == "Depends"
-                    and default.args
-                    and isinstance(default.args[0], ast.Name)
-                ):
-                    deps.append(default.args[0].id)
-
-            # pattern 2: @router.get("/", dependencies=[Depends(func)])
-            for decorator in node.decorator_list:
-                if not isinstance(decorator, ast.Call):
-                    continue
-                for kw in decorator.keywords:
-                    if kw.arg == "dependencies" and isinstance(kw.value, ast.List):
-                        for elt in kw.value.elts:
-                            if (
-                                isinstance(elt, ast.Call)
-                                and isinstance(elt.func, ast.Name)
-                                and elt.func.id == "Depends"
-                                and elt.args
-                                and isinstance(elt.args[0], ast.Name)
-                            ):
-                                deps.append(elt.args[0].id)
-
-            # pattern 3: def handler(x: SessionDep) via Annotated alias
-            # covers both regular args and keyword-only args (after *)
-            for arg in node.args.args + node.args.kwonlyargs:
-                if arg.annotation and isinstance(arg.annotation, ast.Name):
-                    if arg.annotation.id in alias_map:
-                        deps.append(alias_map[arg.annotation.id])
-
-            dep_map[node.name] = deps
-
-    def build_tree(name: str, seen: set[str] | None = None) -> dict:
-        seen = seen or set()
-        if name in seen:
-            return {"name": name, "dependencies": [], "circular": True}
-        seen.add(name)
-        return {
-            "name": name,
-            "dependencies": [build_tree(dep, seen.copy()) for dep in dep_map.get(name, [])],
-        }
-
-    if handler not in dep_map:
+    Includes router-level, include_router, decorator-level and signature dependencies.
+    `handler` may be a function name, a "Class.method" qualname, or a graph id ("app.routes.users:list_users").
+    """
+    kg = load_graph(project_root).graph
+    matches = handler_nodes(kg, handler)
+    if not matches:
         return {"error": f"Handler '{handler}' not found in project"}
-
-    return build_tree(handler)
+    if len(matches) > 1:
+        return {"error": f"Handler '{handler}' is ambiguous", "candidates": sorted(matches)}
+    return dependency_tree(kg, matches[0])
 
 
 # ─── Pydantic Intelligence (AST) ──────────────────────────────────────────────
@@ -353,93 +270,28 @@ def validate_response_models(file: str) -> list[dict]:
 
 @mcp.tool()
 def build_dependency_graph(file: str, project_root: str) -> list[dict]:
-    """Build a full dependency graph: route → handler → dependencies → models."""
-    tree = _parse(file)
-
-    _primitives = {"int", "str", "float", "bool", "bytes", "Any", "None"}
-
-    # collect Annotated aliases across the whole project
-    alias_map: dict[str, str] = {}
-    for py_file in _iter_python_files(project_root):
-        try:
-            t = ast.parse(py_file.read_text())
-        except SyntaxError:
-            continue
-        for node in ast.walk(t):
-            if (
-                isinstance(node, ast.Assign)
-                and isinstance(node.value, ast.Subscript)
-                and isinstance(node.targets[0], ast.Name)
-                and ast.unparse(node.value).startswith("Annotated[")
-            ):
-                slc = node.value.slice
-                if isinstance(slc, ast.Tuple):
-                    for elt in slc.elts:
-                        if (
-                            isinstance(elt, ast.Call)
-                            and isinstance(elt.func, ast.Name)
-                            and elt.func.id == "Depends"
-                        ):
-                            alias_map[node.targets[0].id] = ast.unparse(elt)
+    """Build a full dependency graph for the routes of a file: route → handler → dependencies → models."""
+    kg = load_graph(project_root).graph
+    root = Path(project_root).resolve()
+    rel = Path(file).resolve().relative_to(root).as_posix()
 
     graph = []
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+    for route_id in kg.nodes(NodeType.ROUTE):
+        route = kg.node(route_id)
+        if route["file"] != rel:
             continue
-        for decorator in node.decorator_list:
-            if not isinstance(decorator, ast.Call):
-                continue
-            func = decorator.func
-            if not isinstance(func, ast.Attribute):
-                continue
-            if func.attr not in ("get", "post", "put", "patch", "delete"):
-                continue
-
-            response_model = None
-            for kw in decorator.keywords:
-                if kw.arg == "response_model":
-                    response_model = ast.unparse(kw.value)
-
-            all_args = node.args.args + node.args.kwonlyargs
-            defaults_with_depends = {
-                d.args[0].id
-                for d in node.args.defaults + node.args.kw_defaults
-                if d and isinstance(d, ast.Call)
-                and isinstance(d.func, ast.Name)
-                and d.func.id == "Depends"
-                and d.args
-                and isinstance(d.args[0], ast.Name)
-            }
-
-            input_models = [
-                ast.unparse(a.annotation)
-                for a in all_args
-                if a.annotation
-                and ast.unparse(a.annotation) not in _primitives
-                and ast.unparse(a.annotation) not in alias_map
-                and a.arg not in defaults_with_depends
-                and isinstance(a.annotation, ast.Name)
-                and a.annotation.id[0].isupper()
-            ]
-
-            dependencies = list(defaults_with_depends) + [
-                alias_map[ast.unparse(a.annotation)].split("(")[1].rstrip(")")
-                for a in all_args
-                if a.annotation
-                and isinstance(a.annotation, ast.Name)
-                and a.annotation.id in alias_map
-            ]
-
-            graph.append({
-                "method": func.attr.upper(),
-                "path": decorator.args[0].value if decorator.args else "unknown",
-                "handler": node.name,
-                "input_models": input_models,
-                "dependencies": dependencies,
-                "response_model": response_model,
-            })
-
-    return graph
+        handler_id = kg.successors(route_id, EdgeType.HANDLED_BY)[0]
+        graph.append({
+            "method": route["method"],
+            "path": route["full_paths"][0],
+            "local_path": route["path"],
+            "handler": short_name(kg, handler_id),
+            "input_models": [short_name(kg, m) for m in kg.successors(handler_id, EdgeType.ACCEPTS)],
+            "dependencies": [short_name(kg, d) for d in direct_dependencies(kg, handler_id)],
+            "response_model": route["response_model"],
+            "line": route["line"],
+        })
+    return sorted(graph, key=lambda r: (r["line"], r["method"]))
 
 @mcp.tool()
 def detect_schema_orm_mismatches(orm_file: str, schema_file: str, orm_model: str, schema_model: str) -> dict:

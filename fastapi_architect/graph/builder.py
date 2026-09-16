@@ -219,7 +219,7 @@ class GraphBuilder:
         for r in fn.routes:
             route_id = f"route:{r.method}:{fn_id}"
             self.kg.add_node(route_id, NodeType.ROUTE, f"{r.method} {r.path}", method=r.method, path=r.path,
-                             module=m.module, file=m.file, line=r.line)
+                             response_model=r.response_model, module=m.module, file=m.file, line=r.line)
             self.kg.add_edge(route_id, fn_id, EdgeType.HANDLED_BY)
             if r.owner and (owner := self._symbol(m.module, r.owner)) and self.kg.type_of(owner) in (NodeType.APP, NodeType.ROUTER):
                 self.kg.add_edge(owner, route_id, EdgeType.HAS_ROUTE)

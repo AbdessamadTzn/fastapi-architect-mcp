@@ -77,14 +77,14 @@ def test_list_routes(sample_app: Path):
         ("DELETE", "delete_user"), ("GET", "list_items"), ("POST", "create_item"),
     }
     assert routes[("DELETE", "delete_user")]["is_async"] is True
-    assert routes[("GET", "list_users")]["path"] == "/"
 
 
-@pytest.mark.xfail(reason="router prefixes not resolved yet (PLAN phase 1)", strict=True)
 def test_list_routes_full_path_with_prefixes(sample_app: Path):
     paths = {r["handler"]: r["path"] for r in server.list_routes(str(sample_app))}
 
     assert paths["list_users"] == "/api/users/"
+    assert paths["delete_user"] == "/api/users/{user_id}"
+    assert paths["health"] == "/health"
 
 
 def test_get_dependencies_all_patterns(sample_app: Path):
@@ -101,6 +101,41 @@ def test_get_dependencies_unknown_handler(sample_app: Path):
     assert "error" in server.get_dependencies(str(sample_app), "nope")
 
 
+def test_get_dependencies_prefers_route_handler_over_homonym(sample_app: Path):
+    # app.crud:create_user and app.routes.users:create_user share a name; only one is a handler
+    tree = server.get_dependencies(str(sample_app), "create_user")
+
+    assert tree["id"] == "app.routes.users:create_user"
+
+
+def test_get_dependencies_ambiguous(sample_app: Path):
+    (sample_app / "app" / "other.py").write_text("def get_db():\n    pass\n")
+
+    result = server.get_dependencies(str(sample_app), "get_db")
+
+    assert result["candidates"] == ["app.deps:get_db", "app.other:get_db"]
+
+
+def test_router_level_dependencies(tmp_path: Path):
+    (tmp_path / "main.py").write_text(
+        "from fastapi import APIRouter, Depends, FastAPI\n"
+        "def verify_token(): ...\n"
+        "def audit(): ...\n"
+        "def get_db(): ...\n"
+        "app = FastAPI()\n"
+        "router = APIRouter(prefix='/admin', dependencies=[Depends(verify_token)])\n"
+        "@router.get('/stats')\n"
+        "def stats(db=Depends(get_db)): ...\n"
+        "app.include_router(router, prefix='/v1', dependencies=[Depends(audit)])\n"
+    )
+
+    routes = server.list_routes(str(tmp_path))
+    tree = server.get_dependencies(str(tmp_path), "stats")
+
+    assert routes[0]["path"] == "/v1/admin/stats"
+    assert [d["name"] for d in tree["dependencies"]] == ["audit", "verify_token", "get_db"]
+
+
 def test_build_dependency_graph(sample_app: Path, app_dir: Path):
     graph = {g["handler"]: g for g in server.build_dependency_graph(str(app_dir / "routes" / "users.py"), str(sample_app))}
 
@@ -110,7 +145,6 @@ def test_build_dependency_graph(sample_app: Path, app_dir: Path):
     assert graph["delete_user"]["response_model"] is None
 
 
-@pytest.mark.xfail(reason="decorator-level dependencies=[...] ignored (PLAN phase 2)", strict=True)
 def test_build_dependency_graph_decorator_dependencies(sample_app: Path, app_dir: Path):
     graph = {g["handler"]: g for g in server.build_dependency_graph(str(app_dir / "routes" / "users.py"), str(sample_app))}
 
