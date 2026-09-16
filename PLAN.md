@@ -76,8 +76,10 @@ ID qualifiés : `app.models.database:ForumEvent`.
 - Validation : détection d'auth correcte sur toutes les routes de FileRouge et TechFi24 ; 9 schémas réellement inutilisés dans FileRouge (anciens schémas d'auth)
 
 ### Phase 4 : Visualisation
-- [ ] `export_graph_html()` : HTML autonome (vis-network), couleurs par type, filtres, panneau de détail
-- [ ] `GRAPH_REPORT.md`
+- [x] `export_graph_html()` : HTML autonome (vis-network via CDN), couleurs et formes par type, recherche, filtres par type de nœud et d'arête, panneau de détail avec voisins cliquables, lien direct `#node=<id>`
+- [x] Vue « FastAPI » par défaut : fonctions et classes affichées seulement si elles touchent un nœud FastAPI ; modules et fichiers de test masqués
+- [x] `graph_report(save=True)` → `.fastapi-architect/GRAPH_REPORT.md`
+- Validation : rendu vérifié dans Chrome headless sur FileRouge (204/1301 nœuds affichés par défaut) et TechFi24 (118/487)
 
 ### Phase 5 : Finitions
 - [ ] Validation sur FileRouge et TechFi24
