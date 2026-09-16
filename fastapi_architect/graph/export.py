@@ -20,7 +20,7 @@ NODE_STYLE: dict[NodeType, tuple[str, str]] = {  # type → (color, vis shape)
     NodeType.TEMPLATE: ("#f472b6", "triangleDown"),
     NodeType.FUNCTION: ("#94a3b8", "dot"),
     NodeType.CLASS: ("#cbd5e1", "dot"),
-    NodeType.MODULE: ("#64748b", "ellipse"),
+    NodeType.MODULE: ("#64748b", "dot"),
 }
 
 # nodes shown by default; plain functions/classes only when they touch one of these
