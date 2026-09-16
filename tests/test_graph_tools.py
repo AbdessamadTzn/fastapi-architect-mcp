@@ -165,3 +165,53 @@ def test_graph_report(sample_app: Path):
     assert "| DELETE | `/api/users/{user_id}` | `app.routes.users:delete_user` | dependency: `require_admin` |" in report
     assert "- `users` ← model User, raw SQL in 1 place(s)" in report
     assert "`Unused`" in report
+
+
+# ─── exports ──────────────────────────────────────────────────────────────────
+
+def _embedded_payload(html: str) -> dict:
+    import json
+
+    start = html.index("const DATA = ") + len("const DATA = ")
+    end = html.index(";\nconst byId")
+    return json.loads(html[start:end])
+
+
+def test_export_graph_html_default_location(sample_app: Path):
+    result = server.export_graph_html(str(sample_app))
+
+    html = Path(result["path"]).read_text()
+    assert result["path"] == str(sample_app / ".fastapi-architect" / "graph.html")
+    assert "<title>sample_app — FastAPI knowledge graph</title>" in html
+    payload = _embedded_payload(html)
+    assert len(payload["nodes"]) == result["nodes"]
+    assert len(payload["edges"]) == result["edges"]
+
+
+def test_export_payload_marks_core_nodes(sample_app: Path):
+    payload = _embedded_payload(Path(server.export_graph_html(str(sample_app))["path"]).read_text())
+    nodes = {n["id"]: n for n in payload["nodes"]}
+
+    assert nodes["route:GET:app.routes.users:list_users"]["core"]
+    assert nodes["app.crud:get_users"]["core"]              # uses the User ORM model
+    assert not nodes["app.schemas:UserCreate.password_length"]["core"]  # validator touching nothing
+    assert not nodes["module:app.main"]["core"]
+    assert nodes["route:GET:app.routes.users:list_users"]["full_paths"] == ["/api/users/"]
+
+
+def test_export_escapes_script_breaking_content(tmp_path: Path):
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n"
+        "@app.get('/x</script><script>alert(1)</script>')\ndef x(): ...\n"
+    )
+
+    html = Path(server.export_graph_html(str(tmp_path), str(tmp_path / "out" / "g.html"))["path"]).read_text()
+
+    assert html.count("</script>") == 2  # vis-network include + inline script, nothing injected
+    assert any("alert(1)" in n["label"] for n in _embedded_payload(html)["nodes"])
+
+
+def test_graph_report_save(sample_app: Path):
+    report = server.graph_report(str(sample_app), save=True)
+
+    assert (sample_app / ".fastapi-architect" / "GRAPH_REPORT.md").read_text() == report

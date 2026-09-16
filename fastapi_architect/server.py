@@ -7,6 +7,7 @@ from fastapi_architect.files import iter_python_files as _iter_python_files
 from fastapi_architect.graph import EdgeType, NodeType, load_graph
 from fastapi_architect.graph.audit import audit
 from fastapi_architect.graph.cache import CACHE_DIR, CACHE_FILE
+from fastapi_architect.graph.export import render_html
 from fastapi_architect.graph.report import render_report
 from fastapi_architect.graph.queries import (
     dependency_tree,
@@ -458,6 +459,22 @@ def graph_report(project_root: str, save: bool = False) -> str:
         (root / CACHE_DIR).mkdir(exist_ok=True)
         (root / CACHE_DIR / "GRAPH_REPORT.md").write_text(report)
     return report
+
+@mcp.tool()
+def export_graph_html(project_root: str, output_path: str | None = None) -> dict:
+    """Export the knowledge graph as a standalone interactive HTML page (open it in a browser).
+
+    Nodes are colored by type (Route, Handler, Dependency, Schema, ORMModel, Table...), with search,
+    type filters and a details panel listing each node's connections. Defaults to
+    <project_root>/.fastapi-architect/graph.html. Rendering loads vis-network from a CDN.
+    """
+    root = Path(project_root).resolve()
+    kg = load_graph(root).graph
+    target = Path(output_path).resolve() if output_path else root / CACHE_DIR / "graph.html"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(render_html(kg, f"{root.name} — FastAPI knowledge graph"))
+    return {"path": str(target), "nodes": kg.stats()["nodes"], "edges": kg.stats()["edges"]}
+
 
 def main():
     mcp.run()
