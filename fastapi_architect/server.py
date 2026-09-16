@@ -5,8 +5,9 @@ from pathlib import Path
 
 from fastapi_architect.files import iter_python_files as _iter_python_files
 from fastapi_architect.graph import EdgeType, NodeType, load_graph
-from fastapi_architect.graph.audit import audit, hubs
+from fastapi_architect.graph.audit import audit
 from fastapi_architect.graph.cache import CACHE_DIR, CACHE_FILE
+from fastapi_architect.graph.report import render_report
 from fastapi_architect.graph.queries import (
     dependency_tree,
     direct_dependencies,
@@ -447,69 +448,16 @@ def audit_graph(project_root: str, auth_dependencies: list[str] | None = None) -
 
 
 @mcp.tool()
-def graph_report(project_root: str) -> str:
+def graph_report(project_root: str, save: bool = False) -> str:
     """A concise Markdown overview of the project: stats, routes with their auth, hubs and audit findings.
-    Good first call to understand an unfamiliar FastAPI codebase."""
-    from fastapi_architect.graph.audit import route_auth
-
-    kg = load_graph(project_root).graph
-    stats = kg.stats()
-    findings = audit(kg)
-    lines = [
-        f"# FastAPI knowledge graph — {Path(project_root).resolve().name}",
-        "",
-        f"{stats['nodes']} nodes, {stats['edges']} edges. "
-        + ", ".join(f"{count} {kind}" for kind, count in sorted(stats["node_types"].items()) if kind != "Module"),
-        "",
-        "## Routes",
-        "",
-        "| Method | Path | Handler | Auth |",
-        "|---|---|---|---|",
-    ]
-    for route_id in sorted(kg.nodes(NodeType.ROUTE), key=lambda r: (kg.node(r)["full_paths"][0], kg.node(r)["method"])):
-        route = kg.node(route_id)
-        handler = kg.successors(route_id, EdgeType.HANDLED_BY)[0]
-        auth = route_auth(kg, route_id)
-        lines.append(
-            f"| {route['method']} | `{route['full_paths'][0]}` | `{handler}` | "
-            + (f"{auth['kind']}: `{auth['by']}`" if auth else "—") + " |"
-        )
-
-    lines += ["", "## Most connected symbols", ""]
-    lines += [f"- `{h['id']}` ({h['type']}, degree {h['degree']})" for h in hubs(kg)]
-
-    tables = kg.nodes(NodeType.TABLE)
-    if tables:
-        lines += ["", "## Tables", ""]
-        for table in sorted(tables):
-            models = [short_name(kg, m) for m in kg.predecessors(table, EdgeType.MAPS_TO)]
-            queried_by = kg.predecessors(table, EdgeType.QUERIES)
-            lines.append(
-                f"- `{kg.node(table)['name']}`"
-                + (f" ← model {', '.join(models)}" if models else "")
-                + (f", raw SQL in {len(queried_by)} place(s)" if queried_by else "")
-            )
-
-    summary = findings["summary"]
-    lines += ["", "## Audit", ""]
-    lines.append(f"- Write routes without detected auth: {summary['unprotected_write_routes']}")
-    lines += [
-        f"  - {r['name']}" + (" (likely public)" if r["likely_public"] else "")
-        for r in findings["unprotected_write_routes"]
-    ]
-    for key, label in [
-        ("duplicate_routes", "Duplicate routes"),
-        ("unmounted_routes", "Routes on routers never included"),
-        ("unused_schemas", "Unused schemas"),
-        ("unreferenced_orm_models", "Unreferenced ORM models"),
-        ("dependency_cycles", "Dependency cycles"),
-        ("parse_errors", "Files with syntax errors"),
-    ]:
-        lines.append(f"- {label}: {summary[key]}")
-        if key in ("unused_schemas", "unreferenced_orm_models") and findings[key]:
-            lines.append("  - " + ", ".join(f"`{item['name']}`" for item in findings[key]))
-    return "\n".join(lines) + "\n"
-
+    Good first call to understand an unfamiliar FastAPI codebase.
+    With save=True the report is also written to <project_root>/.fastapi-architect/GRAPH_REPORT.md."""
+    root = Path(project_root).resolve()
+    report = render_report(load_graph(root).graph, root.name)
+    if save:
+        (root / CACHE_DIR).mkdir(exist_ok=True)
+        (root / CACHE_DIR / "GRAPH_REPORT.md").write_text(report)
+    return report
 
 def main():
     mcp.run()
