@@ -62,9 +62,10 @@ def test_rename_symbol_updates_all_files(app_dir: Path):
 
 
 def test_get_completions_after_dot(app_dir: Path):
-    names = {c["name"] for c in server.get_completions(str(app_dir / "crud.py"), 11, 7)}  # `db.`
+    # crud.py line 10: `db_user = User(email=user.` where `user: UserCreate`
+    names = {c["name"] for c in server.get_completions(str(app_dir / "crud.py"), 10, 30)}
 
-    assert names  # untyped `db` still yields object attributes
+    assert {"email", "password"} <= names  # inherited and own Pydantic fields
 
 
 # ─── FastAPI tools ────────────────────────────────────────────────────────────
